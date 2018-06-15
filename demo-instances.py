@@ -32,11 +32,6 @@ config = {}
 pw_size = 8  # chars
 pw_contents = string.ascii_lowercase + string.ascii_uppercase + string.digits
 
-# Create the keys directory if it is not already created
-keys_dir = 'keys/'
-if not os.path.exists(keys_dir):
-    os.makedirs(keys_dir)
-
 # Ubuntu 16.04.03 @ Jetstream
 image_id = 'acb53109-941f-4593-9bf8-4a53cb9e0739'
 
@@ -130,7 +125,7 @@ def create_instances(n):
 
     for i in range(n):
         print('\nCreating Instance #' + str(i))
-        curr_name = prefix + 'key-'+str(i)
+        curr_name = prefix + str(i)
         inst = prov.compute.instances.create(
             name=curr_name, image=img, vm_type=vm_type,
             subnet=sn, key_pair=kp, vm_firewalls=[fw])
@@ -170,14 +165,24 @@ def password_access(ips):
     for each_ip in ips:
         # Generate the instance-specific password
         inst_pass = ''.join(random.choice(pw_contents) for i in range(pw_size))
-        subprocess.run(['ssh', '-o', 'StrictHostKeyChecking=no', '-o', 
-                        'UserKnownHostsFile=/dev/null', '-i', kp_file,
-                        'ubuntu@' + each_ip, 'sed -e \
-                        s/"PasswordAuthentication no"/"PasswordAuthentication yes"/g \
-                        /etc/ssh/sshd_config > gcc-temp.txt \
-                        && sudo mv gcc-temp.txt /etc/ssh/sshd_config\
-                        && sudo service ssh restart\
-                        && echo "ubuntu:' + inst_pass + '" | sudo chpasswd'])
+        subprocess.run([
+            'ssh', '-o', 'StrictHostKeyChecking=no', '-o', 
+            'UserKnownHostsFile=/dev/null', '-i', kp_file,
+            'ubuntu@' + each_ip, 'sed -e \
+            s/"PasswordAuthentication no"/"PasswordAuthentication yes"/g \
+            /etc/ssh/sshd_config > gcc-temp.txt \
+            && sudo mv gcc-temp.txt /etc/ssh/sshd_config\
+            && sudo service ssh restart\
+            && echo "ubuntu:' + inst_pass + '" | sudo chpasswd\
+            && sudo pip install -U cryptography\
+            && sudo rm -rf /usr/lib/python2.7/dist-packages/OpenSSL\
+            && sudo rm -rf /usr/lib/python2.7/dist-packages/pyOpenSSL-0.15.1.egg-info\
+            && sudo pip install pyopenssl\
+            && sudo dpkg --configure -a\
+            && sudo shutdown -r now'])
+# The cryprography and openssl fixes are needed to run the demo at:
+# https://github.com/galaxyproject/dagobah-training/blob/2018-gccbosc/sessions/14-ansible/ex2-galaxy-ansible.md
+# in June 2018
         inst_passws.append(inst_pass)
     return inst_passws
 
