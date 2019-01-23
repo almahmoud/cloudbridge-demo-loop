@@ -29,7 +29,7 @@ def main():
                         required=True, type=int, metavar='[integer]')
     parser.add_argument('-i', '--image',
                         help='ID of image to use for the  instances. Will '
-                             'default to Ubuntu 16.04 on JetStream',
+                             'default to Ubuntu 18.04 on JetStream',
                         required=False,
                         type=str,
                         default='470d2fba-d20b-47b0-a89a-ab725cd09f8b',
@@ -63,6 +63,32 @@ def main():
                         type=str,
                         default='info.txt',
                         metavar='[/path/to/file]')
+    parser.add_argument('-p', '--provider',
+                        help='Provider to be used by CloudBridge',
+                        required=False,
+                        type=str,
+                        choices=['openstack','azure','aws','gce'],
+                        default='openstack')
+    parser.add_argument('--network',
+                        help='Network ID to be used by CloudBridge',
+                        required=False,
+                        type=str,
+                        default='')
+    parser.add_argument('--subnet',
+                        help='Subnet ID to be used by CloudBridge',
+                        required=False,
+                        type=str,
+                        default='')
+    parser.add_argument('--firewall',
+                        help='Firewall ID to be used by CloudBridge',
+                        required=False,
+                        type=str,
+                        default='')
+    parser.add_argument('--router',
+                        help='Router ID to be used by CloudBridge',
+                        required=False,
+                        type=str,
+                        default='')
 
     args = vars(parser.parse_args())
     image_id = args['image']
@@ -71,6 +97,7 @@ def main():
     n = args['number']
     vm_type_name = args['vm_type']
     info_file_path = args['output']
+    prov = args['provider']
 
     # Each instance will have a randomly generated password of this size
     pw_size = 8  # chars
@@ -82,16 +109,46 @@ def main():
     # ADD CONFIGURATION HERE IF YOU DO NOT WISH TO USE SYSTEM-LEVEL CONF
     # Using a configuration file or environment variables by default.
     config = {}
-    provider = _init_provider(config)
+    if prov == "azure":
+        prov = ProviderList.AZURE
+    elif prov == "aws":
+        prov = ProviderList.AWS
+    elif prov == "openstack":
+        prov = ProviderList.OPENSTACK
+    elif prov == "gce":
+        prov = ProviderList.GCE
+
+    provider = _init_provider(config, prov)
     # This Key Pair can be used for all instances
     # The private portion will be created in the current directory with the
     # same name as the Key Pair
     master_kp, kp_file = _init_master_kp(prefix, provider)
 
-    net = _init_network(prefix, provider)
-    sn = _init_subnet(prefix, provider, net)
-    router, gw = _init_router_and_gateway(prefix, provider, sn)
-    fw = _init_firewall(prefix, provider, net)
+    net = args['network']
+    if not net:
+        net = _init_network(prefix, provider)
+    else:
+        net = provider.networking.networks.get(net)
+
+    sn = args['subnet']
+    if not sn:
+        sn = _init_subnet(prefix, provider, net)
+    else:
+        sn = provider.networking.subnets.get(sn)
+
+    router = args['router']
+    if not router:
+        router, gw = _init_router_and_gateway(prefix, provider, sn)
+    else:
+        router = provider.networking.routers.get(router)
+        gw = net.gateways.get_or_create_inet_gateway()
+
+    fw = args['firewall']
+    if not fw:
+        fw = _init_firewall(prefix, provider, net)
+    else:
+        fw = provider.security.vm_firewalls.get(fw)
+
     vm_type = get_vm_type_by_name(provider, vm_type_name)
     image = get_image(provider, image_id)
 
@@ -100,9 +157,9 @@ def main():
                      pw_contents, pw_size, info_file_path)
 
 
-def _init_provider(config):
+def _init_provider(config, provider):
     # Connecting to provider and generating keypair for all instances
-    prov = CloudProviderFactory().create_provider(ProviderList.OPENSTACK,
+    prov = CloudProviderFactory().create_provider(provider,
                                                   config)
     return prov
 
@@ -158,7 +215,10 @@ def _init_subnet(prefix, provider, network):
     if len(sn_find) > 0:
         sn = sn_find[0]
     else:
-        sn = network.create_subnet(label=sn_label, cidr_block='10.0.0.0/24')
+        sn = provider.networking.subnets.create(label=sn_label,
+                                                network=network,
+                                                cidr_block='10.0.0.0/24',
+                                                zone=provider.region_name)
     print("Using subnet: " + str(sn))
     return sn
 
