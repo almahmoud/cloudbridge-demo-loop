@@ -130,11 +130,15 @@ def main():
     else:
         net = provider.networking.networks.get(net)
 
+    print("Using network: " + str(net))
+
     sn = args['subnet']
     if not sn:
         sn = _init_subnet(prefix, provider, net)
     else:
         sn = provider.networking.subnets.get(sn)
+
+    print("Using subnet: " + str(sn))
 
     router = args['router']
     if not router:
@@ -143,11 +147,16 @@ def main():
         router = provider.networking.routers.get(router)
         gw = net.gateways.get_or_create_inet_gateway()
 
+    print("Using router: " + str(router))
+    print("Using gateway: " + str(gw))
+
     fw = args['firewall']
     if not fw:
         fw = _init_firewall(prefix, provider, net)
     else:
         fw = provider.security.vm_firewalls.get(fw)
+
+    print("Using firewall: " + str(fw))
 
     vm_type = get_vm_type_by_name(provider, vm_type_name)
     image = get_image(provider, image_id)
@@ -204,7 +213,6 @@ def _init_network(prefix, provider):
     else:
         net = provider.networking.networks.create(
             label=net_label, cidr_block='10.0.0.0/16')
-    print("Using network: " + str(net))
     return net
 
 
@@ -219,7 +227,6 @@ def _init_subnet(prefix, provider, network):
                                                 network=network,
                                                 cidr_block='10.0.0.0/24',
                                                 zone=provider.region_name)
-    print("Using subnet: " + str(sn))
     return sn
 
 
@@ -237,8 +244,6 @@ def _init_router_and_gateway(prefix, provider, subnet):
 
     gateway = network.gateways.get_or_create_inet_gateway()
     router.attach_gateway(gateway)
-    print("Using router: " + str(router))
-    print("Using gateway: " + str(gateway))
     return router, gateway
 
 
@@ -262,7 +267,6 @@ def _init_firewall(prefix, provider, network):
                         '0.0.0.0/0')
         fw.rules.create(resources.TrafficDirection.INBOUND, 'tcp', 30000,
                         30100, '0.0.0.0/0')
-    print("Using firewall: " + str(fw))
     return fw
 
 
