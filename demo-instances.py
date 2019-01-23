@@ -1,17 +1,15 @@
-'''
+"""
 This script will initialize needed components and create the specified number
-of instances, along with a master ssh key for all instances and a personal
-ssh keypair for each instance. The public portion of the instance-specific
-keypair is already added to the authorized_keys file in each instance.
-The script will store all public and private portions of keys as files in a
-keys/ directory, as well as create a CSV file containing all the information.
+of instances, along with a master ssh key for all instances and set password
+access for each instance.
+The script will also create CSV file containing information about each of
+the instances, including their label, ID, IP, and Password.
 
 This script can be run from command-line as follows:
 python3 demo-instances.py -n [num-instances]
-Additional parameters include:
--s [int] : number to start at for naming instances (counting from 0 by default)
--p prefix : specify a new prefix for all components and instances
-'''
+To view all additional optional parameters, run
+python3 demo-instances.py -h
+"""
 import argparse
 import os
 import random
@@ -196,9 +194,7 @@ def _init_firewall(prefix, provider, network):
         # Opening up the appropriate ports
         fw.rules.create(resources.TrafficDirection.INBOUND, 'tcp', 220, 220,
                         '0.0.0.0/0')
-        fw.rules.create(resources.TrafficDirection.INBOUND, 'tcp', 21, 21,
-                        '0.0.0.0/0')
-        fw.rules.create(resources.TrafficDirection.INBOUND, 'tcp', 22, 22,
+        fw.rules.create(resources.TrafficDirection.INBOUND, 'tcp', 20, 22,
                         '0.0.0.0/0')
         fw.rules.create(resources.TrafficDirection.INBOUND, 'tcp', 80, 80,
                         '0.0.0.0/0')
