@@ -12,200 +12,314 @@ Additional parameters include:
 -s [int] : number to start at for naming instances (counting from 0 by default)
 -p prefix : specify a new prefix for all components and instances
 '''
+import argparse
+import os
+import random
+import string
+import subprocess
+import time
 
 from cloudbridge.cloud.factory import CloudProviderFactory, ProviderList
 from cloudbridge.cloud.interfaces import resources
-import os
-import sys
-import subprocess
-import random
-import string
-import time
 
 
-args = sys.argv
+def main():
+    parser = argparse.ArgumentParser(description='Bulk instance creation '
+                                                 'with CloudBridge')
 
-# Return an error if the number of instances is not specified
-if '-n' not in args:
-    print('ERROR: The number of instances to create must be specified using the \
-          "-n [int]"" argument.')
+    parser.add_argument('-n', '--number', help='Number of instances to create',
+                        required=True, type=int, metavar='[integer]')
+    parser.add_argument('-i', '--image',
+                        help='ID of image to use for the  instances. Will '
+                             'default to Ubuntu 16.04 on JetStream',
+                        required=False,
+                        type=str,
+                        default='470d2fba-d20b-47b0-a89a-ab725cd09f8b',
+                        metavar='[image-id]')
+    parser.add_argument('-l', '--label',
+                        help='Label prefix that will be used for all '
+                             'resources. Will default to "bulk-cb-"',
+                        required=False,
+                        type=str,
+                        default='bulk-cb',
+                        metavar = '[my-prefix]')
+    parser.add_argument('-s', '--start',
+                        help='Number at which to start numbering instances. '
+                             'Will default to 0',
+                        required=False,
+                        type=int,
+                        default=0,
+                        metavar='[integer]')
+    parser.add_argument('-t', '--vm-type',
+                        help='Name of the VM Type to use. Will use '
+                             '"m1.small" by default for JetStream.',
+                        required=False,
+                        type=str,
+                        default='m1.small',
+                        metavar='[vm_type_name]')
+    parser.add_argument('-o', '--output',
+                        help='Path to output file for instance and password '
+                             'information. By default will output to '
+                             '"info.txt" in the current directory',
+                        required=False,
+                        type=str,
+                        default='info.txt',
+                        metavar='[/path/to/file]')
 
-else:
-    # Using a configuration file or environment variables by default.
-    # Specify configuration dictionary here if using it instead
-    config = {}
+    args = vars(parser.parse_args())
+    image_id = args['image']
+    prefix = args['label']
+    start = args['start']
+    n = args['number']
+    vm_type_name = args['vm_type']
+    info_file_path = args['output']
 
     # Each instance will have a randomly generated password of this size
     pw_size = 8  # chars
-    pw_contents = string.ascii_lowercase + string.ascii_uppercase + string.digits
+    # And will use this pool of characters to generate it
+    pw_contents = string.ascii_lowercase
+    pw_contents += string.ascii_uppercase
+    pw_contents += string.digits
 
-    # Ubuntu 16.04.03 @ Jetstream
-    image_id = 'acb53109-941f-4593-9bf8-4a53cb9e0739'
+    # ADD CONFIGURATION HERE IF YOU DO NOT WISH TO USE SYSTEM-LEVEL CONF
+    # Using a configuration file or environment variables by default.
+    config = {}
+    provider = _init_provider(config)
+    # This Key Pair can be used for all instances
+    # The private portion will be created in the current directory with the
+    # same name as the Key Pair
+    master_kp, kp_file = _init_master_kp(prefix, provider)
 
-    # Prefix used for naming all networking components and files
-    if '-p' not in args:
-        prefix = '2018-gcc-training-'
+    net = _init_network(prefix, provider)
+    sn = _init_subnet(prefix, provider, net)
+    router, gw = _init_router_and_gateway(prefix, provider, sn)
+    fw = _init_firewall(prefix, provider, net)
+    vm_type = get_vm_type_by_name(provider, vm_type_name)
+    image = get_image(provider, image_id)
 
-    else:
-        p = args.index('-p') + 1
-        prefix = str(args[p])
+    create_instances(prefix, provider, n, start, sn, gw, fw,
+                     master_kp, vm_type, image, kp_file,
+                     pw_contents, pw_size, info_file_path)
 
-    if '-s' not in args:
-        start = 0
 
-    else:
-        s = args.index('-s') + 1
-        start = int(args[s])
+def _init_provider(config):
+    # Connecting to provider and generating keypair for all instances
+    prov = CloudProviderFactory().create_provider(ProviderList.OPENSTACK,
+                                                  config)
+    return prov
 
-    # The universal private key will be created in a file with this name
-    kp_name = prefix + 'masterkey'
+
+def _init_master_kp(prefix, provider):
+    kp_name = prefix + '-masterkey'
     kp_file = kp_name + '.pem'
 
-    # Connecting to provider and generating keypair for all instances
-    prov = CloudProviderFactory().create_provider(ProviderList.OPENSTACK, config)
-
-    kp_find = prov.security.key_pairs.find(name=kp_name)
+    kp_find = provider.security.key_pairs.find(name=kp_name)
     if len(kp_find) > 0:
         kp = kp_find[0]
 
     else:
-        kp = prov.security.key_pairs.create(kp_name)
+        kp = provider.security.key_pairs.create(kp_name)
 
         # Some software (eg: paramiko) require that RSA be specified
         key_contents = kp.material
         if 'RSA PRIVATE' not in key_contents:
-            key_contents = key_contents.replace('PRIVATE KEY', 'RSA PRIVATE KEY')
+            key_contents = key_contents.replace('PRIVATE KEY',
+                                                'RSA PRIVATE KEY')
 
         # Writing private portion of key to .pem file
         with open(kp_file, 'w') as f:
             f.write(key_contents)
         os.chmod(kp_file, 0o400)
 
+    print("Using Key Pair: " + str(kp))
+    print("Saved private portion to: " + str(kp_file))
+    return kp, kp_file
+
+
+def generate_password(size, characters):
+    return ''.join(random.choice(characters) for i in range(size))
+
+
+def _init_network(prefix, provider):
     # Getting already existing network or creating a new one
-    net_name = prefix + 'network'
-    net_find = prov.networking.networks.find(name=net_name)
+    net_label = prefix + '-network'
+    net_find = provider.networking.networks.find(label=net_label)
     if len(net_find) > 0:
         net = net_find[0]
     else:
-        net = prov.networking.networks.create(
-            name=net_name, cidr_block='10.0.0.0/16')
+        net = provider.networking.networks.create(
+            label=net_label, cidr_block='10.0.0.0/16')
+    print("Using network: " + str(net))
+    return net
 
+
+def _init_subnet(prefix, provider, network):
     # Getting already existing subnet or creating a new one
-    sn_name = prefix + 'subnet'
-    sn_find = prov.networking.subnets.find(name=sn_name)
+    sn_label = prefix + '-subnet'
+    sn_find = provider.networking.subnets.find(label=sn_label)
     if len(sn_find) > 0:
         sn = sn_find[0]
     else:
-        sn = net.create_subnet(name=sn_name, cidr_block='10.0.0.0/25')
+        sn = network.create_subnet(label=sn_label, cidr_block='10.0.0.0/24')
+    print("Using subnet: " + str(sn))
+    return sn
 
+
+def _init_router_and_gateway(prefix, provider, subnet):
     # Getting already existing router or creating a new one
-    router_name = prefix + 'router'
-    router_find = prov.networking.routers.find(name=router_name)
+    router_label = prefix + '-router'
+    network = subnet.network
+    router_find = provider.networking.routers.find(label=router_label)
     if len(router_find) > 0:
         router = router_find[0]
     else:
-        router = prov.networking.routers.create(network=net, name=router_name)
-        router.attach_subnet(sn)
+        router = provider.networking.routers.create(network=network,
+                                                    label=router_label)
+        router.attach_subnet(subnet)
 
-    gateway = net.gateways.get_or_create_inet_gateway(prefix + 'gateway')
+    gateway = network.gateways.get_or_create_inet_gateway()
     router.attach_gateway(gateway)
+    print("Using router: " + str(router))
+    print("Using gateway: " + str(gateway))
+    return router, gateway
 
+
+def _init_firewall(prefix, provider, network):
     # Getting already existing firewall or creating a new one
-    fw_name = prefix + 'firewall'
-    fw_find = prov.security.vm_firewalls.find(name=fw_name)
+    fw_label = prefix + '-firewall'
+    fw_find = provider.security.vm_firewalls.find(label=fw_label)
     if len(fw_find) > 0:
         fw = fw_find[0]
     else:
-        fw = prov.security.vm_firewalls.create(fw_name, 'Instances for demo', net.id)
+        fw = provider.security.vm_firewalls.create(fw_label, network,
+                                                   'Bulk Instances')
         # Opening up the appropriate ports
-        fw.rules.create(resources.TrafficDirection.INBOUND, 'tcp', 220, 220, '0.0.0.0/0')
-        fw.rules.create(resources.TrafficDirection.INBOUND, 'tcp', 21, 21, '0.0.0.0/0')
-        fw.rules.create(resources.TrafficDirection.INBOUND, 'tcp', 22, 22, '0.0.0.0/0')
-        fw.rules.create(resources.TrafficDirection.INBOUND, 'tcp', 80, 80, '0.0.0.0/0')
-        fw.rules.create(resources.TrafficDirection.INBOUND, 'tcp', 8080, 8080, '0.0.0.0/0')
-        fw.rules.create(resources.TrafficDirection.INBOUND, 'tcp', 30000, 30100, '0.0.0.0/0')
+        fw.rules.create(resources.TrafficDirection.INBOUND, 'tcp', 220, 220,
+                        '0.0.0.0/0')
+        fw.rules.create(resources.TrafficDirection.INBOUND, 'tcp', 21, 21,
+                        '0.0.0.0/0')
+        fw.rules.create(resources.TrafficDirection.INBOUND, 'tcp', 22, 22,
+                        '0.0.0.0/0')
+        fw.rules.create(resources.TrafficDirection.INBOUND, 'tcp', 80, 80,
+                        '0.0.0.0/0')
+        fw.rules.create(resources.TrafficDirection.INBOUND, 'tcp', 8080, 8080,
+                        '0.0.0.0/0')
+        fw.rules.create(resources.TrafficDirection.INBOUND, 'tcp', 30000,
+                        30100, '0.0.0.0/0')
+    print("Using firewall: " + str(fw))
+    return fw
 
-    # Get image using the hardcoded ID
-    img = prov.compute.images.get(image_id)
 
-    # Get m1.small VM type (hardcoded), and print to make sure it is the desired one
-    vm_type = [t for t in prov.compute.vm_types][4]
-    print('VM Type used: ')
-    print(vm_type)
+def get_image(provider, image_id):
+    img = provider.compute.images.get(image_id)
+    print("Using image: " + str(img))
+    return img
 
-    def create_instances(n):
-        '''
-        Creates the indicated number of instances after initialization.
-        '''
-        inst_names = []
-        inst_ids = []
-        inst_ips = []
 
-        for i in range(start, n + start):
-            print('\nCreating Instance #' + str(i))
-            curr_name = prefix + str(i)
-            inst = prov.compute.instances.create(
-                name=curr_name, image=img, vm_type=vm_type,
-                subnet=sn, key_pair=kp, vm_firewalls=[fw])
-            inst.wait_till_ready()  # This is a blocking call
+def get_vm_type_by_name(provider, vm_type_name):
+    for t in provider.compute.vm_types:
+        if t.name == vm_type_name:
+            print("Using VM Type: " + str(t))
+            return t
 
-            # Track instances for immediate clean-up if requested
-            inst_names.append(curr_name)
-            inst_ids.append(inst.id)
 
-            # Get an available or create a floating IP, then attach it and print
-            # the public ip
-            fip = None
-            for each_fip in gateway.floating_ips.list():
-                if not each_fip.in_use:
-                    fip = each_fip
-                    break
+def _create_instance(prefix, provider, i, subnet, gateway, firewall,
+                     key_pair, vm_type, image):
+    """
+    Create a single instance
+    """
+    print('\nCreating Instance #' + str(i))
+    curr_label = prefix + "-inst-" + str(i)
+    inst = provider.compute.instances.create(
+        label=curr_label, image=image, vm_type=vm_type,
+        subnet=subnet, key_pair=key_pair, vm_firewalls=[firewall],
+        zone=provider.region_name)
+    inst.wait_till_ready()  # This is a blocking call
 
-            if fip is None:
-                fip = gateway.floating_ips.create()
+    # Get an available or create a floating IP, then attach it and print
+    # the public ip
+    fip = None
+    for each_fip in gateway.floating_ips:
+        if not each_fip.in_use:
+            fip = each_fip
+            break
 
-            inst.add_floating_ip(fip)
-            inst.refresh()
-            inst_ip = str(inst.public_ips[0])
-            print('Instance Public IP: ' + inst_ip)
+    if not fip:
+        fip = gateway.floating_ips.create()
 
-            inst_ips.append(inst_ip)
+    inst.add_floating_ip(fip)
+    inst.refresh()
+    inst_ip = str(inst.public_ips[0])
+    print('Instance Public IP: ' + inst_ip)
+    print('Instance "' + curr_label + '"" created.')
 
-            print('Instance "' + curr_name + '"" created.')
+    return curr_label, inst.id, inst_ip
 
-        print(str(n) + ' instances were successfully created.')
-        return inst_names, inst_ids, inst_ips
 
-    def password_access(ips):
-        inst_passws = []
-        time.sleep(30)
-        for each_ip in ips:
-            # Generate the instance-specific password
-            inst_pass = ''.join(random.choice(pw_contents) for i in range(pw_size))
-            subprocess.run([
-                'ssh', '-o', 'StrictHostKeyChecking=no', '-o', 
-                'UserKnownHostsFile=/dev/null', '-i', kp_file,
-                'ubuntu@' + each_ip, 'sed -e \
-                s/"PasswordAuthentication no"/"PasswordAuthentication yes"/g \
-                /etc/ssh/sshd_config > gcc-temp.txt \
-                && sudo mv gcc-temp.txt /etc/ssh/sshd_config\
-                && sudo service ssh restart\
-                && echo "ubuntu:' + inst_pass + '" | sudo chpasswd\
-                && sudo pip install -U cryptography\
-                && sudo rm -rf /usr/lib/python2.7/dist-packages/OpenSSL\
-                && sudo rm -rf /usr/lib/python2.7/dist-packages/pyOpenSSL-0.15.1.egg-info\
-                && sudo pip install pyopenssl\
-                && sudo shutdown -r now'])
+def set_password_access(ip, desired_password, kp_file_path):
+    # Generate the instance-specific password
+    time.sleep(30)
+    subprocess.run([
+        'ssh', '-o', 'StrictHostKeyChecking=no', '-o',
+        'UserKnownHostsFile=/dev/null', '-i', kp_file_path,
+        'ubuntu@' + ip, 'sed -e \
+            s/"PasswordAuthentication no"/"PasswordAuthentication yes"/g \
+            /etc/ssh/sshd_config > gcc-temp.txt \
+            && sudo mv gcc-temp.txt /etc/ssh/sshd_config\
+            && sudo service ssh restart\
+            && echo "ubuntu:' + desired_password + '" | sudo chpasswd\
+            && sudo pip install -U cryptography\
+            && sudo rm -rf /usr/lib/python2.7/dist-packages/OpenSSL\
+            && sudo rm -rf /usr/lib/python2.7/dist-packages/pyOpenSSL-0.15.1.egg-info\
+            && sudo pip install pyopenssl\
+            && sudo shutdown -r now'])
     # The cryprography and openssl fixes are needed to run the demo at:
     # https://github.com/galaxyproject/dagobah-training/blob/2018-gccbosc/sessions/14-ansible/ex2-galaxy-ansible.md
     # in June 2018
-            inst_passws.append(inst_pass)
-        return inst_passws
+    print("Password changed for instance with ip '{}'".format(ip))
+    return True
 
-    n = args.index('-n') + 1
-    names, ids, ips = create_instances(int(args[n]))
-    pws = password_access(ips)
+
+def append_info_to_file(info_file_path, label, id, ip, password):
     table = '{},{},{},{}\n'
-    with open('info.txt', 'a') as info:
-        for i in range(len(names)):
-            info.write(table.format(names[i], ids[i], ips[i], pws[i]))
+    with open(info_file_path, 'a') as info:
+        info.write(table.format(label, id, ip, password))
+
+
+def create_instances(prefix, provider, n, start, subnet, gateway, firewall,
+                     key_pair, vm_type, image, kp_file_path,
+                     pw_contents, pw_size, info_file_path):
+    """
+    Creates the indicated number of instances after initialization.
+    """
+    init_message = "Creating {} instances, numbered starting from " \
+                   "index {}, and labeled with the prefix '{}'."
+    print(init_message.format(n, start, prefix))
+
+    prev_ip = None
+    prev_label = None
+    prev_id = None
+    for i in range(start, n + start):
+        label, ins_id, ins_ip = _create_instance(prefix, provider, i, subnet,
+                                                 gateway, firewall, key_pair,
+                                                 vm_type, image)
+        # Set the password of the previous instance. This should give enough
+        # time for the instance to boot and be ready for ssh access
+        if prev_ip:
+            pw = generate_password(pw_size, pw_contents)
+            set_password_access(prev_ip, pw, kp_file_path)
+            append_info_to_file(info_file_path, prev_label, prev_id,
+                                prev_ip, pw)
+        prev_ip = ins_ip
+        prev_id = ins_id
+        prev_label = label
+
+    pw = generate_password(pw_size, pw_contents)
+    set_password_access(ins_ip, pw, kp_file_path)
+    append_info_to_file(info_file_path, label, ins_id, ins_ip, pw)
+
+
+if __name__ == "__main__":
+    main()
+
+
