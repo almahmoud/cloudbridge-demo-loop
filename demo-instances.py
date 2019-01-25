@@ -36,7 +36,7 @@ def main():
                         metavar='[image-id]')
     parser.add_argument('-l', '--label',
                         help='Label prefix that will be used for all '
-                             'resources. Will default to "bulk-cb-"',
+                             'resources. Will default to "bulk-cb"',
                         required=False,
                         type=str,
                         default='bulk-cb',
@@ -73,22 +73,47 @@ def main():
                         help='Network ID to be used by CloudBridge',
                         required=False,
                         type=str,
+                        metavar='[net_id]',
                         default='')
     parser.add_argument('--subnet',
                         help='Subnet ID to be used by CloudBridge',
                         required=False,
                         type=str,
+                        metavar='[sn_id]',
                         default='')
     parser.add_argument('--firewall',
                         help='Firewall ID to be used by CloudBridge',
                         required=False,
                         type=str,
+                        metavar='[fw_id]',
                         default='')
     parser.add_argument('--router',
                         help='Router ID to be used by CloudBridge',
                         required=False,
                         type=str,
+                        metavar='[r_id]',
                         default='')
+    parser.add_argument('--stagger',
+                        help='Number of instances to create before starting '
+                             'to set-up ssh password access. Example: if '
+                             '--stagger is 1 (default), it will boot instance '
+                             '#1, boot instance #2, set-up password access '
+                             'for instance #1, boot instance #3, set-up '
+                             'instance #2, etc...',
+                        required=False,
+                        type=int,
+                        metavar='[integer]',
+                        default=1)
+    parser.add_argument('--delay',
+                        help="Number of seconds to wait before setting up "
+                             "SSH access. This is needed if the VMs are not "
+                             "ready for SSH access right after they're "
+                             "booted. Will default to 0",
+                        required=False,
+                        type=int,
+                        metavar='[integer]',
+                        default=0)
+
 
     args = vars(parser.parse_args())
     image_id = args['image']
@@ -98,6 +123,8 @@ def main():
     vm_type_name = args['vm_type']
     info_file_path = args['output']
     prov = args['provider']
+    stagger = args['stagger']
+    delay = args['delay']
 
     # Each instance will have a randomly generated password of this size
     pw_size = 8  # chars
@@ -163,7 +190,8 @@ def main():
 
     create_instances(prefix, provider, n, start, sn, gw, fw,
                      master_kp, vm_type, image, kp_file,
-                     pw_contents, pw_size, info_file_path)
+                     pw_contents, pw_size, info_file_path,
+                     stagger, delay)
 
 
 def _init_provider(config, provider):
@@ -318,21 +346,21 @@ def _create_instance(prefix, provider, i, subnet, gateway, firewall,
 
 def set_password_access(ip, desired_password, kp_file_path):
     # Generate the instance-specific password
-    time.sleep(30)
     subprocess.run([
         'ssh', '-o', 'StrictHostKeyChecking=no', '-o',
         'UserKnownHostsFile=/dev/null', '-i', kp_file_path,
         'ubuntu@' + ip, 'sed -e \
             s/"PasswordAuthentication no"/"PasswordAuthentication yes"/g \
             /etc/ssh/sshd_config > gcc-temp.txt \
-            && sudo mv gcc-temp.txt /etc/ssh/sshd_config\
+            && sudo mv gcc-temp.txt /etc/ssh/sshd_config \
             && sudo service ssh restart\
             && echo "ubuntu:' + desired_password + '" | sudo chpasswd\
-            && sudo pip install -U cryptography\
-            && sudo rm -rf /usr/lib/python2.7/dist-packages/OpenSSL\
-            && sudo rm -rf /usr/lib/python2.7/dist-packages/pyOpenSSL-0.15.1.egg-info\
-            && sudo pip install pyopenssl\
             && sudo shutdown -r now'])
+    # && sudo pip install -U cryptography\
+    # && sudo rm -rf /usr/lib/python2.7/dist-packages/OpenSSL\
+    # && sudo rm -rf /usr/lib/python2.7/dist-packages/\
+    # pyOpenSSL-0.15.1.egg-info\
+    # && sudo pip install pyopenssl\
     # The cryprography and openssl fixes are needed to run the demo at:
     # https://github.com/galaxyproject/dagobah-training/blob/2018-gccbosc/sessions/14-ansible/ex2-galaxy-ansible.md
     # in June 2018
@@ -348,7 +376,8 @@ def append_info_to_file(info_file_path, label, id, ip, password):
 
 def create_instances(prefix, provider, n, start, subnet, gateway, firewall,
                      key_pair, vm_type, image, kp_file_path,
-                     pw_contents, pw_size, info_file_path):
+                     pw_contents, pw_size, info_file_path,
+                     stagger, delay):
     """
     Creates the indicated number of instances after initialization.
     """
@@ -356,27 +385,30 @@ def create_instances(prefix, provider, n, start, subnet, gateway, firewall,
                    "index {}, and labeled with the prefix '{}'."
     print(init_message.format(n, start, prefix))
 
-    prev_ip = None
-    prev_label = None
-    prev_id = None
+    prev_info = []
+
     for i in range(start, n + start):
         label, ins_id, ins_ip = _create_instance(prefix, provider, i, subnet,
                                                  gateway, firewall, key_pair,
                                                  vm_type, image)
-        # Set the password of the previous instance. This should give enough
-        # time for the instance to boot and be ready for ssh access
-        if prev_ip:
+        prev_info.append((label, ins_id, ins_ip))
+
+        if len(prev_info) > stagger:
+            prev_label, prev_id, prev_ip = prev_info.pop(0)
             pw = generate_password(pw_size, pw_contents)
+            if delay:
+                time.sleep(delay)
             set_password_access(prev_ip, pw, kp_file_path)
             append_info_to_file(info_file_path, prev_label, prev_id,
                                 prev_ip, pw)
-        prev_ip = ins_ip
-        prev_id = ins_id
-        prev_label = label
-
-    pw = generate_password(pw_size, pw_contents)
-    set_password_access(ins_ip, pw, kp_file_path)
-    append_info_to_file(info_file_path, label, ins_id, ins_ip, pw)
+    while prev_info:
+        prev_label, prev_id, prev_ip = prev_info.pop(0)
+        pw = generate_password(pw_size, pw_contents)
+        if delay:
+            time.sleep(delay)
+        set_password_access(prev_ip, pw, kp_file_path)
+        append_info_to_file(info_file_path, prev_label, prev_id,
+                            prev_ip, pw)
 
 
 if __name__ == "__main__":
