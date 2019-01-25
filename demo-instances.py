@@ -337,9 +337,19 @@ def _create_instance(prefix, provider, i, subnet, gateway, firewall,
 
     inst.add_floating_ip(fip)
     inst.refresh()
-    inst_ip = str(inst.public_ips[0])
+    try:
+        inst_ip = str(inst.public_ips[0])
+    # Sometimes the refresh above does not properly refresh the public IPs
+    # resulting in no attached IPs and an IndexError
+    # Catch this exception if it happens and retry once after waiting a few
+    # seconds
+    except IndexError:
+        # Arbitrary wait
+        time.sleep(10)
+        inst.refresh()
+        inst_ip = str(inst.public_ips[0])
     print('Instance Public IP: ' + inst_ip)
-    print('Instance "' + curr_label + '"" created.')
+    print('Instance "' + curr_label + '" created.')
 
     return curr_label, inst.id, inst_ip
 
