@@ -17,8 +17,8 @@ import string
 import subprocess
 import time
 
-from cloudbridge.cloud.factory import CloudProviderFactory, ProviderList
-from cloudbridge.cloud.interfaces import resources
+from cloudbridge.factory import CloudProviderFactory, ProviderList
+from cloudbridge.interfaces.resources import TrafficDirection
 
 
 def main():
@@ -32,7 +32,7 @@ def main():
                              'default to Ubuntu 18.04 on JetStream',
                         required=False,
                         type=str,
-                        default='470d2fba-d20b-47b0-a89a-ab725cd09f8b',
+                        default='516b3611-ff7d-4eb3-bca2-80e1aef034dd',
                         metavar='[image-id]')
     parser.add_argument('-l', '--label',
                         help='Label prefix that will be used for all '
@@ -172,7 +172,7 @@ def main():
         router, gw = _init_router_and_gateway(prefix, provider, sn)
     else:
         router = provider.networking.routers.get(router)
-        gw = net.gateways.get_or_create_inet_gateway()
+        gw = net.gateways.get_or_create()
 
     print("Using router: " + str(router))
     print("Using gateway: " + str(gw))
@@ -210,6 +210,7 @@ def _init_master_kp(prefix, provider):
         kp = kp_find[0]
 
     else:
+        print("KeyPair not found. Creating new Keypair\n")
         kp = provider.security.key_pairs.create(kp_name)
 
         # Some software (eg: paramiko) require that RSA be specified
@@ -222,9 +223,9 @@ def _init_master_kp(prefix, provider):
         with open(kp_file, 'w') as f:
             f.write(key_contents)
         os.chmod(kp_file, 0o400)
+    print("Private key saved in: " + str(kp_file))
 
     print("Using Key Pair: " + str(kp))
-    print("Saved private portion to: " + str(kp_file))
     return kp, kp_file
 
 
@@ -285,15 +286,15 @@ def _init_firewall(prefix, provider, network):
         fw = provider.security.vm_firewalls.create(fw_label, network,
                                                    'Bulk Instances')
         # Opening up the appropriate ports
-        fw.rules.create(resources.TrafficDirection.INBOUND, 'tcp', 220, 220,
+        fw.rules.create(TrafficDirection.INBOUND, 'tcp', 220, 220,
                         '0.0.0.0/0')
-        fw.rules.create(resources.TrafficDirection.INBOUND, 'tcp', 20, 22,
+        fw.rules.create(TrafficDirection.INBOUND, 'tcp', 20, 22,
                         '0.0.0.0/0')
-        fw.rules.create(resources.TrafficDirection.INBOUND, 'tcp', 80, 80,
+        fw.rules.create(TrafficDirection.INBOUND, 'tcp', 80, 80,
                         '0.0.0.0/0')
-        fw.rules.create(resources.TrafficDirection.INBOUND, 'tcp', 8080, 8080,
+        fw.rules.create(TrafficDirection.INBOUND, 'tcp', 8080, 8080,
                         '0.0.0.0/0')
-        fw.rules.create(resources.TrafficDirection.INBOUND, 'tcp', 30000,
+        fw.rules.create(TrafficDirection.INBOUND, 'tcp', 30000,
                         30100, '0.0.0.0/0')
     return fw
 
@@ -334,6 +335,9 @@ def _create_instance(prefix, provider, i, subnet, gateway, firewall,
 
     if not fip:
         fip = gateway.floating_ips.create()
+        print("Created new IP: " + fip.public_ip)
+    else:
+        print("Using existing IP: " + fip.public_ip)
 
     inst.add_floating_ip(fip)
     inst.refresh()
@@ -364,8 +368,8 @@ def set_password_access(ip, desired_password, kp_file_path):
             /etc/ssh/sshd_config > gcc-temp.txt \
             && sudo mv gcc-temp.txt /etc/ssh/sshd_config \
             && sudo service ssh restart\
-            && echo "ubuntu:' + desired_password + '" | sudo chpasswd\
-            && sudo shutdown -r now'])
+            && echo "ubuntu:' + desired_password + '" | sudo chpasswd \
+            && exit'])
     # && sudo pip install -U cryptography\
     # && sudo rm -rf /usr/lib/python2.7/dist-packages/OpenSSL\
     # && sudo rm -rf /usr/lib/python2.7/dist-packages/\
