@@ -1,12 +1,15 @@
 """
-This script will initialize needed components and create the specified number
-of instances, along with a master ssh key for all instances and set password
-access for each instance.
+Initialize needed cloud components and create the specified number of VMs.
+
 The script will also create CSV file containing information about each of
-the instances, including their label, ID, IP, and Password.
+the instances, including their label, ID, IP, and optionally password.
+
+To run, need to define CloudBridge connection config file at `~/.cloudbrige`.
+See http://cloudbridge.cloudve.org/en/latest/topics/setup.html#providing-access-credentials-in-a-cloudbridge-config-file
 
 This script can be run from command-line as follows:
-python3 demo-instances.py -n [num-instances]
+python3 demo-instances.py -n [num instances]
+
 To view all additional optional parameters, run
 python3 demo-instances.py -h
 """
@@ -23,34 +26,38 @@ from cloudbridge.interfaces.resources import TrafficDirection
 
 def main():
     parser = argparse.ArgumentParser(description='Bulk instance creation '
-                                                 'with CloudBridge')
+                                                 'with CloudBridge.')
 
-    parser.add_argument('-n', '--number', help='Number of instances to create',
-                        required=True, type=int, metavar='[integer]')
+    parser.add_argument('-n', '--number',
+                        help='Number of instances to create. If not supplied, '
+                             'default to 1.',
+                        required=False,
+                        type=int,
+                        metavar='[integer]')
     parser.add_argument('-i', '--image',
                         help='ID of image to use for the  instances. Will '
-                             'default to Ubuntu 18.04 on JetStream',
+                             'default to Ubuntu 18.04 on Jetstream.',
                         required=False,
                         type=str,
                         default='516b3611-ff7d-4eb3-bca2-80e1aef034dd',
                         metavar='[image-id]')
     parser.add_argument('-l', '--label',
                         help='Label prefix that will be used for all '
-                             'resources. Will default to "bulk-cb"',
+                             'resources. Will default to "bulk-cb".',
                         required=False,
                         type=str,
                         default='bulk-cb',
-                        metavar = '[my-prefix]')
+                        metavar='[my-prefix]')
     parser.add_argument('-s', '--start',
                         help='Number at which to start numbering instances. '
-                             'Will default to 0',
+                             'Will default to 0.',
                         required=False,
                         type=int,
                         default=0,
                         metavar='[integer]')
     parser.add_argument('-t', '--vm-type',
                         help='Name of the VM Type to use. Will use '
-                             '"m1.small" by default for JetStream.',
+                             '"m1.small" by default for Jetstream.',
                         required=False,
                         type=str,
                         default='m1.small',
@@ -58,37 +65,38 @@ def main():
     parser.add_argument('-o', '--output',
                         help='Path to output file for instance and password '
                              'information. By default will output to '
-                             '"info.txt" in the current directory',
+                             '"info.txt" in the current directory.',
                         required=False,
                         type=str,
                         default='info.txt',
                         metavar='[/path/to/file]')
     parser.add_argument('-p', '--provider',
-                        help='Provider to be used by CloudBridge',
+                        help='Provider to be used by CloudBridge. Defaults to'
+                             '"openstack".',
                         required=False,
                         type=str,
-                        choices=['openstack','azure','aws','gce'],
+                        choices=['openstack', 'azure', 'aws', 'gce'],
                         default='openstack')
     parser.add_argument('--network',
-                        help='Network ID to be used by CloudBridge',
+                        help='Network ID to be used by CloudBridge.',
                         required=False,
                         type=str,
                         metavar='[net_id]',
                         default='')
     parser.add_argument('--subnet',
-                        help='Subnet ID to be used by CloudBridge',
+                        help='Subnet ID to be used by CloudBridge.',
                         required=False,
                         type=str,
                         metavar='[sn_id]',
                         default='')
     parser.add_argument('--firewall',
-                        help='Firewall ID to be used by CloudBridge',
+                        help='Firewall ID to be used by CloudBridge.',
                         required=False,
                         type=str,
                         metavar='[fw_id]',
                         default='')
     parser.add_argument('--router',
-                        help='Router ID to be used by CloudBridge',
+                        help='Router ID to be used by CloudBridge.',
                         required=False,
                         type=str,
                         metavar='[r_id]',
@@ -108,23 +116,36 @@ def main():
                         help="Number of seconds to wait before setting up "
                              "SSH access. This is needed if the VMs are not "
                              "ready for SSH access right after they're "
-                             "booted. Will default to 0",
+                             "booted. Will default to 0.",
                         required=False,
                         type=int,
                         metavar='[integer]',
                         default=0)
-
+    parser.add_argument('--enable-password-login',
+                        help="If set, enable password-based ssh login for "
+                             "the launched instane(s).",
+                        dest="pwd",
+                        required=False,
+                        action='store_true')
+    parser.add_argument('--delete',
+                        help='Instance ID to delete.',
+                        required=False,
+                        type=str,
+                        metavar='[instance id]',
+                        default='')
 
     args = vars(parser.parse_args())
     image_id = args['image']
     prefix = args['label']
     start = args['start']
-    n = args['number']
+    n = args['number'] if args['number'] else 1
     vm_type_name = args['vm_type']
     info_file_path = args['output']
     prov = args['provider']
     stagger = args['stagger']
     delay = args['delay']
+    enable_pwd = args['pwd']
+    delete_inst = args['delete']
 
     # Each instance will have a randomly generated password of this size
     pw_size = 8  # chars
@@ -146,6 +167,12 @@ def main():
         prov = ProviderList.GCE
 
     provider = _init_provider(config, prov)
+
+    # If delete arg was supplied, delete the give instance and exit
+    if delete_inst:
+        _delete_instance(provider, delete_inst)
+        exit(0)
+
     # This Key Pair can be used for all instances
     # The private portion will be created in the current directory with the
     # same name as the Key Pair
@@ -156,7 +183,6 @@ def main():
         net = _init_network(prefix, provider)
     else:
         net = provider.networking.networks.get(net)
-
     print("Using network: " + str(net))
 
     sn = args['subnet']
@@ -164,7 +190,6 @@ def main():
         sn = _init_subnet(prefix, provider, net)
     else:
         sn = provider.networking.subnets.get(sn)
-
     print("Using subnet: " + str(sn))
 
     router = args['router']
@@ -173,7 +198,6 @@ def main():
     else:
         router = provider.networking.routers.get(router)
         gw = net.gateways.get_or_create()
-
     print("Using router: " + str(router))
     print("Using gateway: " + str(gw))
 
@@ -182,7 +206,6 @@ def main():
         fw = _init_firewall(prefix, provider, net)
     else:
         fw = provider.security.vm_firewalls.get(fw)
-
     print("Using firewall: " + str(fw))
 
     vm_type = get_vm_type_by_name(provider, vm_type_name)
@@ -191,7 +214,7 @@ def main():
     create_instances(prefix, provider, n, start, sn, gw, fw,
                      master_kp, vm_type, image, kp_file,
                      pw_contents, pw_size, info_file_path,
-                     stagger, delay)
+                     stagger, delay, enable_pwd)
 
 
 def _init_provider(config, provider):
@@ -199,6 +222,13 @@ def _init_provider(config, provider):
     prov = CloudProviderFactory().create_provider(provider,
                                                   config)
     return prov
+
+
+def _delete_instance(provider, inst_id):
+    inst = provider.compute.instances.get(inst_id)
+    if inst:
+        print("Deleting instance " + str(inst))
+        inst.delete()
 
 
 def _init_master_kp(prefix, provider):
@@ -210,7 +240,7 @@ def _init_master_kp(prefix, provider):
         kp = kp_find[0]
 
     else:
-        print("KeyPair not found. Creating new Keypair\n")
+        print("Key pair not found. Creating a new key pair.")
         kp = provider.security.key_pairs.create(kp_name)
 
         # Some software (eg: paramiko) require that RSA be specified
@@ -223,9 +253,8 @@ def _init_master_kp(prefix, provider):
         with open(kp_file, 'w') as f:
             f.write(key_contents)
         os.chmod(kp_file, 0o400)
-    print("Private key saved in: " + str(kp_file))
-
-    print("Using Key Pair: " + str(kp))
+        print("Private key stored in: " + str(kp_file))
+    print("Using key pair: " + str(kp))
     return kp, kp_file
 
 
@@ -254,8 +283,7 @@ def _init_subnet(prefix, provider, network):
     else:
         sn = provider.networking.subnets.create(label=sn_label,
                                                 network=network,
-                                                cidr_block='10.0.0.0/24',
-                                                zone=provider.region_name)
+                                                cidr_block='10.0.0.0/24')
     return sn
 
 
@@ -271,7 +299,7 @@ def _init_router_and_gateway(prefix, provider, subnet):
                                                     label=router_label)
         router.attach_subnet(subnet)
 
-    gateway = network.gateways.get_or_create_inet_gateway()
+    gateway = network.gateways.get_or_create()
     router.attach_gateway(gateway)
     return router, gateway
 
@@ -284,18 +312,13 @@ def _init_firewall(prefix, provider, network):
         fw = fw_find[0]
     else:
         fw = provider.security.vm_firewalls.create(fw_label, network,
-                                                   'Bulk Instances')
-        # Opening up the appropriate ports
-        fw.rules.create(TrafficDirection.INBOUND, 'tcp', 220, 220,
-                        '0.0.0.0/0')
-        fw.rules.create(TrafficDirection.INBOUND, 'tcp', 20, 22,
-                        '0.0.0.0/0')
-        fw.rules.create(TrafficDirection.INBOUND, 'tcp', 80, 80,
-                        '0.0.0.0/0')
-        fw.rules.create(TrafficDirection.INBOUND, 'tcp', 8080, 8080,
-                        '0.0.0.0/0')
-        fw.rules.create(TrafficDirection.INBOUND, 'tcp', 30000,
-                        30100, '0.0.0.0/0')
+                                                   'Bulk instances')
+        # Opening up the appropriate ports, as as list of tuples in the
+        # following format: (from_port, to_port).
+        ports = [(22, 22), (80, 80), (8080, 8080), (30000, 30100)]
+        for port in ports:
+            fw.rules.create(TrafficDirection.INBOUND, 'tcp', port[0], port[1],
+                            '0.0.0.0/0')
     return fw
 
 
@@ -321,8 +344,7 @@ def _create_instance(prefix, provider, i, subnet, gateway, firewall,
     curr_label = prefix + "-inst-" + str(i)
     inst = provider.compute.instances.create(
         label=curr_label, image=image, vm_type=vm_type,
-        subnet=subnet, key_pair=key_pair, vm_firewalls=[firewall],
-        zone=provider.region_name)
+        subnet=subnet, key_pair=key_pair, vm_firewalls=[firewall])
     inst.wait_till_ready()  # This is a blocking call
 
     # Get an available or create a floating IP, then attach it and print
@@ -382,7 +404,7 @@ def set_password_access(ip, desired_password, kp_file_path):
     return True
 
 
-def append_info_to_file(info_file_path, label, id, ip, password):
+def append_info_to_file(info_file_path, label, id, ip, password=None):
     table = '{},{},{},{}\n'
     with open(info_file_path, 'a') as info:
         info.write(table.format(label, id, ip, password))
@@ -391,7 +413,7 @@ def append_info_to_file(info_file_path, label, id, ip, password):
 def create_instances(prefix, provider, n, start, subnet, gateway, firewall,
                      key_pair, vm_type, image, kp_file_path,
                      pw_contents, pw_size, info_file_path,
-                     stagger, delay):
+                     stagger, delay, enable_pwd):
     """
     Creates the indicated number of instances after initialization.
     """
@@ -409,23 +431,23 @@ def create_instances(prefix, provider, n, start, subnet, gateway, firewall,
 
         if len(prev_info) > stagger:
             prev_label, prev_id, prev_ip = prev_info.pop(0)
+            if enable_pwd:
+                pw = generate_password(pw_size, pw_contents)
+                if delay:
+                    time.sleep(delay)
+                set_password_access(prev_ip, pw, kp_file_path)
+            append_info_to_file(info_file_path, prev_label, prev_id,
+                                prev_ip)
+    while prev_info:
+        prev_label, prev_id, prev_ip = prev_info.pop(0)
+        if enable_pwd:
             pw = generate_password(pw_size, pw_contents)
             if delay:
                 time.sleep(delay)
             set_password_access(prev_ip, pw, kp_file_path)
-            append_info_to_file(info_file_path, prev_label, prev_id,
-                                prev_ip, pw)
-    while prev_info:
-        prev_label, prev_id, prev_ip = prev_info.pop(0)
-        pw = generate_password(pw_size, pw_contents)
-        if delay:
-            time.sleep(delay)
-        set_password_access(prev_ip, pw, kp_file_path)
         append_info_to_file(info_file_path, prev_label, prev_id,
-                            prev_ip, pw)
+                            prev_ip)
 
 
 if __name__ == "__main__":
     main()
-
-
