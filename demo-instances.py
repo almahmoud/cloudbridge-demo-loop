@@ -431,22 +431,24 @@ def create_instances(prefix, provider, n, start, subnet, gateway, firewall,
 
         if len(prev_info) > stagger:
             prev_label, prev_id, prev_ip = prev_info.pop(0)
+            pw = None
             if enable_pwd:
                 pw = generate_password(pw_size, pw_contents)
                 if delay:
                     time.sleep(delay)
                 set_password_access(prev_ip, pw, kp_file_path)
             append_info_to_file(info_file_path, prev_label, prev_id,
-                                prev_ip)
+                                prev_ip, pw)
     while prev_info:
         prev_label, prev_id, prev_ip = prev_info.pop(0)
+        pw = None
         if enable_pwd:
             pw = generate_password(pw_size, pw_contents)
             if delay:
                 time.sleep(delay)
             set_password_access(prev_ip, pw, kp_file_path)
         append_info_to_file(info_file_path, prev_label, prev_id,
-                            prev_ip)
+                            prev_ip, pw)
 
 
 if __name__ == "__main__":
