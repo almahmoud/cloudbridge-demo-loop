@@ -101,17 +101,6 @@ def main():
                         type=str,
                         metavar='[r_id]',
                         default='')
-    parser.add_argument('--stagger',
-                        help='Number of instances to create before starting '
-                             'to set-up ssh password access. Example: if '
-                             '--stagger is 1 (default), it will boot instance '
-                             '#1, boot instance #2, set-up password access '
-                             'for instance #1, boot instance #3, set-up '
-                             'instance #2, etc...',
-                        required=False,
-                        type=int,
-                        metavar='[integer]',
-                        default=1)
     parser.add_argument('--delay',
                         help="Number of seconds to wait before setting up "
                              "SSH access. This is needed if the VMs are not "
@@ -120,19 +109,25 @@ def main():
                         required=False,
                         type=int,
                         metavar='[integer]',
-                        default=0)
-    parser.add_argument('--enable-password-login',
-                        help="If set, enable password-based ssh login for "
-                             "the launched instane(s).",
-                        dest="pwd",
-                        required=False,
-                        action='store_true')
+                        default=1)
     parser.add_argument('--delete',
                         help='Instance ID to delete.',
                         required=False,
                         type=str,
                         metavar='[instance id]',
                         default='')
+    pwd_group = parser.add_mutually_exclusive_group()
+    pwd_group.add_argument('--password',
+                           help='SSH password access will be enabled if '
+                                '"--password" or "--random-password" is used',
+                           required=False,
+                           type=str)
+    pwd_group.add_argument('--random-password',
+                           help="If set, enable password-based ssh login for "
+                                "the launched instane(s).",
+                           dest="random_pwd",
+                           required=False,
+                           action='store_true')
 
     args = vars(parser.parse_args())
     image_id = args['image']
@@ -142,10 +137,11 @@ def main():
     vm_type_name = args['vm_type']
     info_file_path = args['output']
     prov = args['provider']
-    stagger = args['stagger']
     delay = args['delay']
-    enable_pwd = args['pwd']
+    random_pwd = args['random_pwd']
     delete_inst = args['delete']
+    global_password = args['password']
+    enable_pwd = global_password or random_pwd
 
     # Each instance will have a randomly generated password of this size
     pw_size = 8  # chars
@@ -214,7 +210,7 @@ def main():
     create_instances(prefix, provider, n, start, sn, gw, fw,
                      master_kp, vm_type, image, kp_file,
                      pw_contents, pw_size, info_file_path,
-                     stagger, delay, enable_pwd)
+                     delay, enable_pwd, global_password)
 
 
 def _init_provider(config, provider):
@@ -269,6 +265,7 @@ def _init_network(prefix, provider):
     if len(net_find) > 0:
         net = net_find[0]
     else:
+        print("Creating new network")
         net = provider.networking.networks.create(
             label=net_label, cidr_block='10.0.0.0/16')
     return net
@@ -281,6 +278,7 @@ def _init_subnet(prefix, provider, network):
     if len(sn_find) > 0:
         sn = sn_find[0]
     else:
+        print("Creating new subnet")
         sn = provider.networking.subnets.create(label=sn_label,
                                                 network=network,
                                                 cidr_block='10.0.0.0/24')
@@ -295,6 +293,7 @@ def _init_router_and_gateway(prefix, provider, subnet):
     if len(router_find) > 0:
         router = router_find[0]
     else:
+        print("Creating new router")
         router = provider.networking.routers.create(network=network,
                                                     label=router_label)
         router.attach_subnet(subnet)
@@ -311,6 +310,7 @@ def _init_firewall(prefix, provider, network):
     if len(fw_find) > 0:
         fw = fw_find[0]
     else:
+        print("Creating new firewall")
         fw = provider.security.vm_firewalls.create(fw_label, network,
                                                    'Bulk instances')
         # Opening up the appropriate ports, as as list of tuples in the
@@ -380,18 +380,44 @@ def _create_instance(prefix, provider, i, subnet, gateway, firewall,
     return curr_label, inst.id, inst_ip
 
 
-def set_password_access(ip, desired_password, kp_file_path):
-    # Generate the instance-specific password
-    subprocess.run([
-        'ssh', '-o', 'StrictHostKeyChecking=no', '-o',
-        'UserKnownHostsFile=/dev/null', '-i', kp_file_path,
-        'ubuntu@' + ip, 'sed -e \
-            s/"PasswordAuthentication no"/"PasswordAuthentication yes"/g \
-            /etc/ssh/sshd_config > gcc-temp.txt \
-            && sudo mv gcc-temp.txt /etc/ssh/sshd_config \
-            && sudo service ssh restart\
-            && echo "ubuntu:' + desired_password + '" | sudo chpasswd \
-            && exit'])
+def add_password_access(prev, ip, pwd, kp_file_path):
+    prev.append((1, ip, pwd, kp_file_path))
+    return attempt_password_access(prev)
+
+
+def attempt_password_access(prev):
+    max_attempts = 10
+    new = []
+    for i in range(len(prev)):
+        attempt, currip, pwd, kp = prev[i]
+        print("Attempt #{}/{} to change password for "
+              "instance with IP '{}'".format(attempt, max_attempts, currip))
+        result = _set_password_access(currip, pwd, kp)
+        if result.returncode == 0:
+            print("Successfully changed password for "
+                  "instance with IP '{}'".format(currip))
+        else:
+            print("Attempt failed with returncode {} and error "
+                  "message '{}'".format(result.returncode, result.stderr))
+            if attempt == max_attempts:
+                print("ALL ATTEMPTS FAILED. PASSWORD IS NOT ENABLED FOR "
+                      "THE INSTANCE WITH IP '{}'".format(currip))
+            else:
+                new.append((attempt + 1, currip, pwd, kp))
+    return new
+
+
+def _set_password_access(ip, desired_password, kp_file_path):
+    return subprocess.run([
+            'ssh', '-o', 'StrictHostKeyChecking=no', '-o',
+            'UserKnownHostsFile=/dev/null', '-i', kp_file_path,
+            'ubuntu@' + ip, 'sed -e \
+                s/"PasswordAuthentication no"/"PasswordAuthentication yes"/g \
+                /etc/ssh/sshd_config > gcc-temp.txt \
+                && sudo mv gcc-temp.txt /etc/ssh/sshd_config \
+                && sudo service ssh restart\
+                && echo "ubuntu:' + desired_password + '" | sudo chpasswd \
+                && exit'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     # && sudo pip install -U cryptography\
     # && sudo rm -rf /usr/lib/python2.7/dist-packages/OpenSSL\
     # && sudo rm -rf /usr/lib/python2.7/dist-packages/\
@@ -400,8 +426,6 @@ def set_password_access(ip, desired_password, kp_file_path):
     # The cryprography and openssl fixes are needed to run the demo at:
     # https://github.com/galaxyproject/dagobah-training/blob/2018-gccbosc/sessions/14-ansible/ex2-galaxy-ansible.md
     # in June 2018
-    print("Password changed for instance with ip '{}'".format(ip))
-    return True
 
 
 def append_info_to_file(info_file_path, label, id, ip, password=None):
@@ -413,7 +437,7 @@ def append_info_to_file(info_file_path, label, id, ip, password=None):
 def create_instances(prefix, provider, n, start, subnet, gateway, firewall,
                      key_pair, vm_type, image, kp_file_path,
                      pw_contents, pw_size, info_file_path,
-                     stagger, delay, enable_pwd):
+                     delay, enable_pwd, global_pwd):
     """
     Creates the indicated number of instances after initialization.
     """
@@ -421,34 +445,23 @@ def create_instances(prefix, provider, n, start, subnet, gateway, firewall,
                    "index {}, and labeled with the prefix '{}'."
     print(init_message.format(n, start, prefix))
 
-    prev_info = []
+    pw_list = []
 
     for i in range(start, n + start):
         label, ins_id, ins_ip = _create_instance(prefix, provider, i, subnet,
                                                  gateway, firewall, key_pair,
                                                  vm_type, image)
-        prev_info.append((label, ins_id, ins_ip))
-
-        if len(prev_info) > stagger:
-            prev_label, prev_id, prev_ip = prev_info.pop(0)
-            pw = None
-            if enable_pwd:
-                pw = generate_password(pw_size, pw_contents)
-                if delay:
-                    time.sleep(delay)
-                set_password_access(prev_ip, pw, kp_file_path)
-            append_info_to_file(info_file_path, prev_label, prev_id,
-                                prev_ip, pw)
-    while prev_info:
-        prev_label, prev_id, prev_ip = prev_info.pop(0)
         pw = None
         if enable_pwd:
-            pw = generate_password(pw_size, pw_contents)
-            if delay:
-                time.sleep(delay)
-            set_password_access(prev_ip, pw, kp_file_path)
-        append_info_to_file(info_file_path, prev_label, prev_id,
-                            prev_ip, pw)
+            pw = (global_pwd if global_pwd
+                  else generate_password(pw_size, pw_contents))
+            pw_list = add_password_access(pw_list, ins_ip,
+                                          pw, kp_file_path)
+        append_info_to_file(info_file_path, label, ins_id, ins_ip, pw)
+
+    while pw_list:
+        time.sleep(delay)
+        pw_list = attempt_password_access(pw_list)
 
 
 if __name__ == "__main__":
